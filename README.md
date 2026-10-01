@@ -5,6 +5,7 @@ Web app statik dengan rekoder SVG, pengesanan pic setempat, simpanan kemajuan pa
 
 ## Buka aplikasi
 
+- Laman awam: https://aliefdanial25.github.io/eyes-up-recorder/
 - Pratonton komputer ini: http://127.0.0.1:4173/?v=1.0
 - Windows: jika Node.js tersedia, klik dua kali **Start-EYES-UP.cmd**, kemudian buka pautan yang dipaparkan. Biarkan tetingkap pelayan terbuka.
 - Windows / Mac: dengan Node.js, jalankan **node serve.cjs** dalam folder ini. Alternatif: Live Server.
@@ -30,7 +31,7 @@ Ketepatan = cubaan betul ÷ semua cubaan pic stabil × 100. Not tepat pada cubaa
 
 ## GitHub Pages
 
-Kandungan folder ini sedia untuk dihoskan sebagai laman statik. Tiada penerbitan dilakukan oleh perubahan ini.
+Laman diterbitkan melalui GitHub Pages daripada cawangan main, folder root. Gunakan pautan HTTPS di atas pada peranti lain.
 
 1. Letakkan **kandungan** folder aplikasi di root repositori Pages atau folder docs yang dipilih dalam tetapan Pages.
 2. Pastikan index.html, manifest.webmanifest, service-worker.js, semua CSS/JS, assets dan .nojekyll disertakan.
