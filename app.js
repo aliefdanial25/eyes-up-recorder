@@ -8,7 +8,7 @@ const RECORDER_NOTES = Object.freeze({
  "D'": Object.freeze({frequency:1174.66,closed:Object.freeze([2]),staffY:60,instruction:'Buka lubang ibu jari belakang dan tutup lubang 2 sahaja.'})
 });
 const NOTE_NAMES=Object.keys(RECORDER_NOTES);
-const PITCH_TOLERANCE_CENTS=45, REQUIRED_STABLE_FRAMES=7, RMS_GATE=0.008;
+const PITCH_TOLERANCE_CENTS=45, REQUIRED_STABLE_FRAMES=7, DEFAULT_RMS_GATE=0.008;
 const MIN_FREQUENCY=650, MAX_FREQUENCY=1350, FRAME_INTERVAL_MS=40;
 const MODES=[['home','⌂','Home',''],['know','▤','Know It','Kenali not dan penjarian.'],['finger','♧','Finger It','Latih memori dan pertukaran jari.'],['eyes','◎','Eyes Up','Fokus skor tanpa bantuan penjarian.'],['live','◉','Live Practice','Main dan kesan pic masa nyata.'],['assessment','♜','Assessment','Nilai pencapaian dan kesalahan.']];
 const COLORS=['#6edaf1','#be9dff','#8ce9b4','#ffc185','#ffda82'];
@@ -19,6 +19,8 @@ let state={mode:'home',sequence:NOTE_NAMES,index:0,errors:freshErrors(),attempts
 let helpTimer, countdownTimer, advanceTimer, micStream, audioContext, analyser, source, animationFrame;
 let initialized=false,referenceRequest=0,referenceOscillator=null,referenceGain=null;
 let micRequest=0, lastFrame=0, stableKey='',stableFrames=0,latchedKey='',silenceFrames=0,busy=false,referenceUntil=0;
+const MIC_CALIBRATION_VERSION=1, MIC_AMBIENT_MS=2200, MIC_SIGNAL_MS=3000;
+let micCalibration=null,forceRecalibration=false;
 function target(){return state.sequence[state.index];}
 function training(){return ['eyes','live','assessment'].includes(state.mode);}
 function resetDetector(){stableKey='';stableFrames=0;latchedKey='';silenceFrames=0;}
@@ -122,11 +124,80 @@ function finish(){
  $('results').innerHTML=`<span class="eyebrow">${measured?'PRESTASI SESI INI':'LATIHAN MEMORI'}</span><div class="result-medal" aria-hidden="true">★</div><h2>Syabas!</h2><div class="result-subtitle">MISI SELESAI</div><img class="result-companion" src="assets/mascot.webp" width="90" height="105" alt="Maskot meraikan usaha kamu"><p>${measured?'Kamu berjaya memainkan semua not sasaran.':'Latihan jari selesai. Cuba Eyes Up untuk semakan bunyi melalui mikrofon.'}</p>${measured?`<div class="result-numbers"><div><strong>${accuracy}%</strong><span>Ketepatan cubaan</span></div><div><strong>${state.firstTry} / ${state.sequence.length}</strong><span>Not betul cubaan pertama</span></div><div><strong>${state.attempts}</strong><span>Jumlah cubaan</span></div><div><strong>${state.bestStreak}</strong><span>Streak terbaik</span></div></div><p>Not diselesaikan: ${state.correct} / ${state.sequence.length} · Bantuan digunakan: ${state.assisted}</p><h3>Kesalahan mengikut not</h3>${NOTE_NAMES.map(n=>`<div class="error-row"><span>${n}</span><div class="error-bar"><i style="width:${state.errors[n]/Math.max(1,...Object.values(state.errors))*100}%"></i></div><span>${state.errors[n]}</span></div>`).join('')}<div class="strength-grid"><div><span>NOT TERKUAT SESI INI</span><strong>${strongest}</strong><p>Ketepatan tertinggi bagi not yang dimainkan.</p></div><div><span>LATIH LAGI</span><strong>${wrong?difficult:'Tiada kesalahan'}</strong><p>${wrong?'Beri not ini sedikit lagi latihan.':'Cuba latihan seterusnya.'}</p></div></div><h3>Cadangan latihan</h3><p>${recommendation}</p>`:''}<div class="result-actions"><button class="${wrong||!measured?'secondary':'primary'}" id="retry">Latih semula</button>${wrong?'<button class="primary" id="adaptive">Latihan tambahan</button>':''}${!measured?'<button class="primary" data-mode="eyes">Teruskan Eyes Up</button>':''}<button class="secondary" data-mode="home">Kembali ke Home</button></div>`;
  $('retry').onclick=()=>setMode(state.mode,[...state.sequence]);if($('adaptive'))$('adaptive').onclick=()=>setMode('live',adaptiveSequence(difficult));renderStats();
 }
+
+// Device-adaptive microphone calibration. Audio never leaves the browser.
+function rmsLevel(samples){
+ let sum=0,mean=0;for(const x of samples)mean+=x;mean/=samples.length;
+ for(const x of samples)sum+=(x-mean)**2;
+ return Math.sqrt(sum/samples.length);
+}
+function percentile(values,p){
+ if(!values.length)return 0;
+ const sorted=[...values].sort((a,b)=>a-b),index=Math.min(sorted.length-1,Math.max(0,Math.round((sorted.length-1)*p)));
+ return sorted[index];
+}
+function currentRmsGate(){
+ return Number.isFinite(micCalibration?.detectionThreshold)&&micCalibration.detectionThreshold>0?micCalibration.detectionThreshold:DEFAULT_RMS_GATE;
+}
+function loadMicCalibration(){
+ if(typeof readLocal!=='function')return null;
+ const saved=readLocal('mic-calibration');
+ if(saved?.version===MIC_CALIBRATION_VERSION&&Number.isFinite(saved.noiseFloor)&&Number.isFinite(saved.recorderSignalLevel)&&Number.isFinite(saved.detectionThreshold)&&saved.detectionThreshold>0){
+  micCalibration=saved;
+ }else micCalibration=null;
+ return micCalibration;
+}
+function updateCalibrationUI(message=''){
+ const el=$('calibration-status');if(!el)return;
+ if(message){el.textContent=message;return;}
+ if(forceRecalibration)el.textContent='Peranti mikrofon berubah atau kalibrasi semula dipilih.';
+ else if(micCalibration)el.textContent='Kalibrasi peranti aktif ✓';
+ else el.textContent='Belum dikalibrasi pada peranti ini.';
+}
+function saveMicCalibration(value){
+ micCalibration=value;forceRecalibration=false;
+ if(typeof writeLocal==='function')writeLocal('mic-calibration',value);
+ updateCalibrationUI();
+}
+const waitMs=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function collectRmsWindow(analyserNode,durationMs,request){
+ const samples=new Float32Array(analyserNode.fftSize),levels=[],start=performance.now();
+ while(performance.now()-start<durationMs){
+  if(request!==micRequest){const error=new Error('Calibration cancelled');error.name='AbortError';throw error;}
+  analyserNode.getFloatTimeDomainData(samples);levels.push(rmsLevel(samples));await waitMs(50);
+ }
+ return levels;
+}
+async function calibrateMicrophone(request,stream,analyserNode){
+ setMicStatus('CALIBRATING');
+ updateCalibrationUI('Kalibrasi sedang dijalankan…');
+ $('mic-message').textContent='Kalibrasi 1/2 · Kekal senyap selama 2 saat untuk mengukur bunyi persekitaran.';
+ await waitMs(350);
+ const ambient=await collectRmsWindow(analyserNode,MIC_AMBIENT_MS,request);
+ const noiseFloor=Math.max(0.0003,percentile(ambient,.75));
+ $('mic-message').textContent='Kalibrasi 2/2 · Tiup satu not rekoder dengan stabil selama kira-kira 3 saat.';
+ await waitMs(650);
+ const signalWindow=await collectRmsWindow(analyserNode,MIC_SIGNAL_MS,request);
+ const candidates=signalWindow.filter(value=>value>noiseFloor*1.12);
+ const recorderSignalLevel=percentile(candidates.length?candidates:signalWindow,.75);
+ if(!Number.isFinite(recorderSignalLevel)||recorderSignalLevel<=noiseFloor*1.18){
+  updateCalibrationUI('Kalibrasi belum berjaya. Cuba semula dalam keadaan lebih senyap.');
+  return false;
+ }
+ const detectionThreshold=Math.max(0.0008,Math.min(0.06,noiseFloor+(recorderSignalLevel-noiseFloor)*0.30));
+ const normalizationFactor=Math.max(0.5,Math.min(8,0.05/recorderSignalLevel));
+ const deviceId=stream.getAudioTracks()[0]?.getSettings?.().deviceId||'';
+ saveMicCalibration({version:MIC_CALIBRATION_VERSION,noiseFloor,recorderSignalLevel,detectionThreshold,normalizationFactor,deviceId,calibratedAt:new Date().toISOString()});
+ $('mic-message').textContent='Kalibrasi siap ✓ Mikrofon disesuaikan untuk peranti ini.';
+ await waitMs(450);
+ return true;
+}
+
 // YIN: normalized difference and parabolic interpolation, not FFT bins.
 // Search beyond the exercise range first so a low octave is rejected, not relabelled.
 function detectPitch(samples,sampleRate){
  let energy=0,mean=0;for(const x of samples)mean+=x;mean/=samples.length;for(const x of samples)energy+=(x-mean)**2;
- if(Math.sqrt(energy/samples.length)<RMS_GATE)return null;
+ if(Math.sqrt(energy/samples.length)<currentRmsGate())return null;
  const maxTau=Math.min(Math.floor(sampleRate/300),Math.floor(samples.length/2)),minTau=Math.floor(sampleRate/1800),size=samples.length-maxTau,diff=new Float64Array(maxTau+1);
  let sum=0;diff[0]=1;
  for(let tau=1;tau<=maxTau;tau++){let d=0;for(let i=0;i<size;i++){const delta=samples[i]-samples[i+tau];d+=delta*delta;}sum+=d;diff[tau]=sum?d*tau/sum:1;}
@@ -177,10 +248,12 @@ async function playReference(){
 }
 function setMicStatus(status){
  state.microphoneStatus=status;
- $('mic-button').disabled=status==='REQUESTING'||status==='STOPPING';
- $('mic-button').textContent=status==='ACTIVE'?'Matikan mikrofon':'Aktifkan mikrofon';
- $('mic-status').textContent=status==='ACTIVE'?'MIC ON ●':'MIC OFF';
+ const locked=status==='REQUESTING'||status==='STOPPING'||status==='CALIBRATING';
+ $('mic-button').disabled=locked;
+ $('mic-button').textContent=status==='ACTIVE'?'Matikan mikrofon':status==='CALIBRATING'?'Sedang kalibrasi…':'Aktifkan mikrofon';
+ $('mic-status').textContent=status==='ACTIVE'?'MIC ON ●':status==='CALIBRATING'?'CALIBRATING…':'MIC OFF';
  $('mic-status').classList.toggle('on',status==='ACTIVE');
+ const recalibrate=$('recalibrate-button');if(recalibrate)recalibrate.disabled=locked;
 }
 async function startMic(){
  if(state.microphoneStatus==='REQUESTING'||state.microphoneStatus==='STOPPING')return;
@@ -196,7 +269,14 @@ async function startMic(){
   acquiredStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
   if(request!==micRequest){acquiredStream.getTracks().forEach(t=>t.stop());return;}
   micStream=acquiredStream;source=ctx.createMediaStreamSource(micStream);analyser=ctx.createAnalyser();analyser.fftSize=2048;source.connect(analyser);
-  resetDetector();setMicStatus('ACTIVE');$('mic-message').textContent='Menunggu bunyi rekoder...';
+  const currentDeviceId=micStream.getAudioTracks()[0]?.getSettings?.().deviceId||'';
+  const deviceChanged=Boolean(micCalibration?.deviceId&&currentDeviceId&&micCalibration.deviceId!==currentDeviceId);
+  if(!micCalibration||forceRecalibration||deviceChanged){
+   const calibrated=await calibrateMicrophone(request,micStream,analyser);
+   if(request!==micRequest)return;
+   if(!calibrated){stopMic();$('mic-message').textContent='Kalibrasi belum berjaya. Tekan Kalibrasi Semula dan tiup satu not dengan stabil.';return;}
+  }
+  resetDetector();setMicStatus('ACTIVE');updateCalibrationUI();$('mic-message').textContent='Menunggu bunyi rekoder...';
   const samples=new Float32Array(analyser.fftSize);lastFrame=0;
   const loop=time=>{
    animationFrame=null;if(request!==micRequest||state.microphoneStatus!=='ACTIVE')return;
@@ -209,7 +289,7 @@ async function startMic(){
  }catch(error){
   if(request!==micRequest){if(acquiredStream)acquiredStream.getTracks().forEach(t=>t.stop());return;}
   diagnostic('microphone',error);stopMic();
-  $('mic-message').textContent=error.name==='NotAllowedError'?'Benarkan akses mikrofon untuk menggunakan Pitch Detector.':error.name==='NotFoundError'?'Tiada mikrofon ditemui. Sambungkan mikrofon dan cuba lagi.':'Mikrofon tidak dapat dimulakan. Semak sambungan atau tutup aplikasi lain yang menggunakan mikrofon.';
+  $('mic-message').textContent=error.name==='NotAllowedError'?'Benarkan akses mikrofon untuk menggunakan Pitch Detector.':error.name==='NotFoundError'?'Tiada mikrofon ditemui. Sambungkan mikrofon dan cuba lagi.':error.name==='NotReadableError'?'Mikrofon sedang digunakan atau tidak dapat dibaca. Tutup aplikasi lain yang menggunakan mikrofon dan cuba lagi.':'Mikrofon tidak dapat dimulakan. Semak sambungan atau tutup aplikasi lain yang menggunakan mikrofon.';
  }
  // No stale finally handler: only the current request may change the button.
 }
@@ -232,7 +312,11 @@ function reportUnexpectedError(error){
 }
 function init(){
  if(initialized)return;initialized=true;
- loadProgress();
+ loadProgress();loadMicCalibration();updateCalibrationUI();
+ if(navigator.mediaDevices?.addEventListener)navigator.mediaDevices.addEventListener('devicechange',()=>{
+  forceRecalibration=true;updateCalibrationUI('Peranti mikrofon berubah. Kalibrasi semula disyorkan.');
+  if(state.microphoneStatus==='ACTIVE')$('mic-message').textContent='Peranti mikrofon berubah. Kalibrasi semula disyorkan sebelum meneruskan.';
+ });
  // Resizing is independent of the audio loop; no per-frame layout reads.
  if(typeof ResizeObserver!=='undefined')new ResizeObserver(keepCurrentNoteVisible).observe($('score'));
  else window.addEventListener('resize',keepCurrentNoteVisible);
@@ -244,7 +328,7 @@ function init(){
  document.addEventListener('click',e=>{const modeButton=e.target.closest('button[data-mode]');if(modeButton){setMode(modeButton.dataset.mode);return;}const noteButton=e.target.closest('[data-note]');if(noteButton)chooseIndex(NOTE_NAMES.indexOf(noteButton.dataset.note));});
  $('previous').onclick=()=>chooseIndex(Math.max(0,state.index-1));$('next').onclick=()=>{if(state.mode==='know'&&state.index===4)setMode('finger');else advance();};
  $('exercise-select').onchange=e=>{leavePage();state.exercise=Number(e.target.value);state.sequence=(state.mode==='finger'?EXERCISES.finger:EXERCISES.eyes)[state.exercise];resetExercise();renderLesson();renderStats();};
- $('show-names').onchange=renderScore;$('tone-button').onclick=playReference;$('mic-button').onclick=startMic;$('help-button').onclick=()=>showHelp();$('scaffold-button').onclick=()=>showHelp();
+ $('show-names').onchange=renderScore;$('tone-button').onclick=playReference;$('mic-button').onclick=startMic;$('recalibrate-button').onclick=()=>{forceRecalibration=true;updateCalibrationUI();if(state.microphoneStatus==='ACTIVE')stopMic();startMic();};$('help-button').onclick=()=>showHelp();$('scaffold-button').onclick=()=>showHelp();
  window.addEventListener('pagehide',leavePage);document.addEventListener('visibilitychange',()=>{if(document.hidden)leavePage();});
  setMode('home');
 }
