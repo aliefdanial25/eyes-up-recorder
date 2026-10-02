@@ -1,6 +1,6 @@
 'use strict';
 // Increment RELEASE whenever a shell file changes. Scope isolates GitHub Pages repos.
-const RELEASE='1.0.1-20261002';
+const RELEASE='1.0.2-20261002';
 const CACHE_PREFIX='eyes-up-shell:'+self.registration.scope+':';
 const CACHE_NAME=CACHE_PREFIX+RELEASE;
 const SHELL=['./','index.html','style.css','ui/studio.css','ui/classroom.css','ui/learning.css','ui/device.css','storage.js','ui.js','app.js','ui/classroom.js','pwa.js','manifest.webmanifest','assets/classroom.webp','assets/mascot.webp','assets/icon-192.png','assets/icon-512.png','assets/icon-maskable-512.png','assets/apple-touch-icon.png'];
